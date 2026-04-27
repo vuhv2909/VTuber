@@ -8,9 +8,7 @@ Assumption:
 - YAMasterTub is installed at C:\YAMasterTub
 
 Files:
-- yt_reup_tool.bat: main launcher
 - TV Media Launcher.bat: start the localhost Web UI
-- start_yt_reup_tool.bat: legacy shortcut kept for compatibility
 - update.bat: download and apply the latest version from GitHub
 - setup_machine.bat: verify Python, ffmpeg, ffprobe, and C:\YAMasterTub
 - yt_reup_tool\runtime\config.json: shared bundle config
