@@ -1,4 +1,4 @@
 @echo off
 setlocal
-call "%~dp0yt_reup_tool.bat" web
+call "%~dp0TV Media Launcher.bat"
 endlocal

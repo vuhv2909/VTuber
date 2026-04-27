@@ -9,7 +9,8 @@ Assumption:
 
 Files:
 - yt_reup_tool.bat: main launcher
-- start_yt_reup_tool.bat: start the localhost Web UI
+- TV Media Launcher.bat: start the localhost Web UI
+- start_yt_reup_tool.bat: legacy shortcut kept for compatibility
 - update.bat: download and apply the latest version from GitHub
 - setup_machine.bat: verify Python, ffmpeg, ffprobe, and C:\YAMasterTub
 - yt_reup_tool\runtime\config.json: shared bundle config
@@ -22,7 +23,7 @@ Use on another machine:
 3. Make sure ffmpeg and ffprobe are in PATH.
 4. Make sure YAMasterTub exists at C:\YAMasterTub and has your channels/cookies.
 5. Run setup_machine.bat.
-6. Run start_yt_reup_tool.bat.
+6. Run TV Media Launcher.bat.
 7. The browser should open automatically. If not, open:
    http://127.0.0.1:8765
 
