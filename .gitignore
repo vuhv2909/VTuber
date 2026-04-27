@@ -1,0 +1,8 @@
+reup_outputs/*
+!reup_outputs/.gitkeep
+yt_reup_tool/runtime/logs/
+yt_reup_tool/runtime/state.*.json
+yt_reup_tool/runtime/state.json
+yt_reup_tool/__pycache__/
+yt_reup_tool/*.pyc
+yt_reup_tool/web/__pycache__/

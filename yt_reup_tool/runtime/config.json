@@ -1,0 +1,22 @@
+{
+  "yamastertub_root": "C:\\YAMasterTub",
+  "channel_folder_name": "",
+  "language_codes": [
+    "en",
+    "en-AU",
+    "en-CA",
+    "en-IN",
+    "en-IE",
+    "en-GB",
+    "en-US",
+    "es",
+    "es-419",
+    "es-MX",
+    "es-ES",
+    "es-US"
+  ],
+  "output_dir": "..\\..\\reup_outputs",
+  "ffmpeg_path": "ffmpeg",
+  "ffprobe_path": "ffprobe",
+  "auto_start_aas_delete_checker": false
+}

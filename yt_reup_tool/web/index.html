@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YT Reup Tool</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero card">
+      <div>
+        <p class="eyebrow">TV Media</p>
+        <h1>YT Reup Tool</h1>
+      </div>
+    </header>
+
+    <section class="card control-card">
+      <div class="card-head compact-head">
+        <div>
+          <h2>Workspace</h2>
+        </div>
+        <div class="channel-box">
+          <label for="channelSelect">Channel</label>
+          <select id="channelSelect"></select>
+        </div>
+      </div>
+
+      <div class="folder-form">
+        <label class="field-block" for="musicFolderInput">
+          <span>Music Folder</span>
+          <input type="text" id="musicFolderInput" placeholder="D:\Music\Album A">
+        </label>
+        <label class="field-block" for="videoFolderInput">
+          <span>Video Folder</span>
+          <input type="text" id="videoFolderInput" placeholder="D:\Videos\Short Clips">
+        </label>
+      </div>
+
+      <div class="toolbar">
+        <button class="ghost" id="saveFoldersBtn">Apply Folders</button>
+        <button class="ghost" id="clearFoldersBtn">Clear</button>
+      </div>
+
+      <div class="workspace-flow">
+        <div class="workflow-actions">
+          <button class="ghost" data-action="render">Render</button>
+          <button class="ghost" data-action="process">Process</button>
+          <button class="ghost" data-action="upload">Upload</button>
+          <button class="ghost" data-action="premium">Add Premium</button>
+          <button class="primary" data-action="next">Run Next Phase</button>
+        </div>
+        <div class="status-banner status-idle" id="statusBanner">
+          <p class="status-title" id="statusTitle">Ready</p>
+          <p class="message-line" id="messageLine">Choose folders and run a phase.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card pipeline-card">
+      <div class="card-head">
+        <div>
+          <h2>Pipeline Table</h2>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="pipeline-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Output</th>
+              <th>Music</th>
+              <th>Video</th>
+              <th>Render</th>
+              <th>Process</th>
+              <th>Upload</th>
+              <th>Video ID</th>
+              <th>Premium</th>
+              <th>AddSub Done</th>
+              <th>Overall</th>
+              <th>Note</th>
+              <th>Retry</th>
+            </tr>
+          </thead>
+          <tbody id="pipelineBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
