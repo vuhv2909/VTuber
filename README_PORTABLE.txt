@@ -10,7 +10,7 @@ Assumption:
 Files:
 - yt_reup_tool.bat: main launcher
 - start_yt_reup_tool.bat: start the localhost Web UI
-- update.bat: pull the latest version from GitHub
+- update.bat: download and apply the latest version from GitHub
 - setup_machine.bat: verify Python, ffmpeg, ffprobe, and C:\YAMasterTub
 - yt_reup_tool\runtime\config.json: shared bundle config
 - yt_reup_tool\runtime\state.<machine>.json: per-machine local state
@@ -29,7 +29,9 @@ Use on another machine:
 Update later:
 1. Open this folder.
 2. Run update.bat.
+3. No git knowledge is required.
 
 Notes:
 - Each machine keeps its own selected channel and local runtime state.
 - If a machine has a different channel list, the tool will fall back to the first loaded channel on that machine.
+- update.bat keeps local runtime state, logs, and reup_outputs on that machine.
