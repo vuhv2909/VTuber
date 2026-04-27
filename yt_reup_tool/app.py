@@ -578,6 +578,11 @@ class ReupPipelineService:
         if not source_music_files:
             return source_music_files, source_video_files, [""] * len(source_video_files), list(source_video_files)
 
+        if len(source_music_files) >= len(source_video_files):
+            paired_music_files = list(source_music_files[: len(source_video_files)])
+            paired_video_files = list(source_video_files)
+            return source_music_files, source_video_files, paired_music_files, paired_video_files
+
         paired_music_files = [
             source_music_files[index % len(source_music_files)]
             for index in range(len(source_video_files))
