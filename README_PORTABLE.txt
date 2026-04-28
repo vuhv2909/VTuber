@@ -2,7 +2,8 @@ YT Reup Tool Bundle
 
 Mode:
 - Localhost Web UI
-- Default address: http://127.0.0.1:8765
+- Starts from: http://127.0.0.1:8765
+- If that port is busy, the tool automatically moves to the next free localhost port
 
 Assumption:
 - YAMasterTub is installed at C:\YAMasterTub
@@ -22,8 +23,8 @@ Use on another machine:
 4. Make sure YAMasterTub exists at C:\YAMasterTub and has your channels/cookies.
 5. Run setup_machine.bat.
 6. Run TV Media Launcher.bat.
-7. The browser should open automatically. If not, open:
-   http://127.0.0.1:8765
+7. The browser should open automatically. If not, check:
+   yt_reup_tool\runtime\last_webui_url.txt
 
 Update later:
 1. Open this folder.

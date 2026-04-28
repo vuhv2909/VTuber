@@ -46,6 +46,7 @@ if errorlevel 1 (
 
 echo.
 echo Setup check passed.
-echo Web UI address: http://127.0.0.1:8765
+echo Web UI will auto-select a free localhost port starting from 8765.
+echo If 8765 is busy, the tool will move to the next free port automatically.
 popd
 endlocal

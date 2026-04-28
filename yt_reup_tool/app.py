@@ -1934,7 +1934,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     web_parser = subparsers.add_parser("web", help="Run localhost Web UI")
     web_parser.add_argument("--host", default="127.0.0.1", help="Bind host for the local web UI.")
-    web_parser.add_argument("--port", type=int, default=8765, help="Bind port for the local web UI.")
+    web_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Optional preferred bind port for the local web UI. If omitted, the tool derives one from the install folder and auto-falls forward if busy.",
+    )
     web_parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser.")
     subparsers.add_parser("ui", help="Open desktop UI")
     subparsers.add_parser("status", help="Print current job status")

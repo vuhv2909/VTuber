@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import webbrowser
+import zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +11,34 @@ from urllib.parse import parse_qs, urlparse
 from typing import Any
 
 from .app import APP_TITLE, PREMIUM_DONE_STATUS, PROCESSED_STATUS, RENDERED_STATUS, VIDEO_CREATED_STATUS, ReupPipelineService
+
+
+def _create_server_with_available_port(
+    host: str,
+    preferred_port: int,
+    handler: type[BaseHTTPRequestHandler],
+    attempts: int = 100,
+) -> tuple[ThreadingHTTPServer, int]:
+    last_error: OSError | None = None
+    for port in range(preferred_port, preferred_port + attempts):
+        try:
+            return ThreadingHTTPServer((host, port), handler), port
+        except OSError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise RuntimeError(
+            f"Could not bind a free localhost port in range {preferred_port}-{preferred_port + attempts - 1}: {last_error}"
+        ) from last_error
+    raise RuntimeError(
+        f"Could not bind a free localhost port in range {preferred_port}-{preferred_port + attempts - 1}."
+    )
+
+
+def _preferred_port_for_install(service: ReupPipelineService, base_port: int = 8765, spread: int = 50) -> int:
+    install_root = str(service.runtime_dir.resolve().parent)
+    offset = zlib.crc32(install_root.encode("utf-8")) % spread
+    return base_port + offset
 
 
 def _read_asset_text(path: Path) -> str:
@@ -252,16 +281,23 @@ def run_web_ui(
     service: ReupPipelineService,
     *,
     host: str = "127.0.0.1",
-    port: int = 8765,
+    port: int | None = None,
     open_browser: bool = True,
 ) -> int:
     controller = WebUIController(service)
     assets_dir = Path(__file__).resolve().parent / "web"
     WebRequestHandler.controller = controller
     WebRequestHandler.assets_dir = assets_dir
-    server = ThreadingHTTPServer((host, port), WebRequestHandler)
-    url = f"http://{host}:{port}"
+    preferred_port = port if port is not None else _preferred_port_for_install(service)
+    server, selected_port = _create_server_with_available_port(host, preferred_port, WebRequestHandler)
+    url = f"http://{host}:{selected_port}"
+    last_url_path = service.runtime_dir / "last_webui_url.txt"
+    last_url_path.write_text(url, encoding="utf-8")
     print(f"{APP_TITLE} Web UI running at {url}")
+    if port is None:
+        print(f"Preferred start port for this folder: {preferred_port}")
+    if selected_port != preferred_port:
+        print(f"Preferred port {preferred_port} was busy. Switched to {selected_port}.")
     if open_browser:
         try:
             webbrowser.open(url)
