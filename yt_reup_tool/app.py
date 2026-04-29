@@ -13,6 +13,7 @@ import threading
 import time
 import tkinter as tk
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -30,6 +31,14 @@ UPLOADED_STATUS = "Uploaded"
 VIDEO_CREATED_STATUS = "VideoCreated"
 PREMIUM_DONE_STATUS = "PremiumDone"
 PENDING_RETRY_STATUS = "PendingRetry"
+WORKFLOW_FULL = "full"
+WORKFLOW_PROCESS_ONLY = "process_only"
+WORKFLOW_UPLOAD_ONLY = "upload_only"
+SUPPORTED_WORKFLOW_MODES = {
+    WORKFLOW_FULL,
+    WORKFLOW_PROCESS_ONLY,
+    WORKFLOW_UPLOAD_ONLY,
+}
 DEFAULT_LANGUAGE_CODES = [
     "en",
     "en-AU",
@@ -55,6 +64,9 @@ VIDEO_FILETYPES = [
 ]
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+PROCESS_ONLY_RE = re.compile(r"^output_(\d+)\.mp4$", re.IGNORECASE)
+UPLOAD_ONLY_PROCESSED_RE = re.compile(r"^output_(\d+)_processed\.mp4$", re.IGNORECASE)
+UPLOAD_ONLY_AUDIO_RE = re.compile(r"^output_(\d+)\.m4a$", re.IGNORECASE)
 
 UI_BG = "#eef3f8"
 SURFACE_BG = "#ffffff"
@@ -160,6 +172,31 @@ def probe_primary_stream_codec(path: Path, ffprobe_bin: str, stream_selector: st
         errors="replace",
     )
     return (result.stdout or "").strip().lower()
+
+
+@dataclass(frozen=True)
+class WorkflowRow:
+    index: int
+    output_base: str
+    workflow_mode: str
+    music_path: str
+    video_path: str
+    status: str
+    output_mp4_path: str
+    output_m4a_path: str
+    processed_mp4_path: str
+
+
+@dataclass(frozen=True)
+class PhaseRunSummary:
+    action: str
+    phase: str
+    total_ready: int
+    target_count: int
+    done: int
+    failed: int
+    pending: int
+    skipped: int
 
 
 class QueueLogHandler(logging.Handler):
@@ -284,8 +321,10 @@ class ReupPipelineService:
             "machine_key": self.machine_key,
             "bundle_root": str(self.bundle_root),
             "selected_channel": "",
+            "workflow_mode": WORKFLOW_FULL,
             "music_folder": "",
             "video_folder": "",
+            "source_folder": "",
             "music_files": [],
             "video_files": [],
             "jobs": {},
@@ -328,8 +367,11 @@ class ReupPipelineService:
         state = self._blank_state()
         state["version"] = int(source.get("version") or STATE_VERSION)
         state["selected_channel"] = str(source.get("selected_channel") or "").strip()
+        workflow_mode = str(source.get("workflow_mode") or WORKFLOW_FULL).strip().lower()
+        state["workflow_mode"] = workflow_mode if workflow_mode in SUPPORTED_WORKFLOW_MODES else WORKFLOW_FULL
         state["music_folder"] = str(source.get("music_folder") or "").strip()
         state["video_folder"] = str(source.get("video_folder") or "").strip()
+        state["source_folder"] = str(source.get("source_folder") or "").strip()
         state["music_files"] = list(source.get("music_files") or [])
         state["video_files"] = list(source.get("video_files") or [])
         state["jobs"] = dict(source.get("jobs") or {})
@@ -372,8 +414,11 @@ class ReupPipelineService:
         self.state["machine_key"] = self.machine_key
         self.state["bundle_root"] = str(self.bundle_root)
         self.state["selected_channel"] = str(self.state.get("selected_channel") or "").strip()
+        workflow_mode = str(self.state.get("workflow_mode") or WORKFLOW_FULL).strip().lower()
+        self.state["workflow_mode"] = workflow_mode if workflow_mode in SUPPORTED_WORKFLOW_MODES else WORKFLOW_FULL
         self.state["music_folder"] = str(self.state.get("music_folder") or "").strip()
         self.state["video_folder"] = str(self.state.get("video_folder") or "").strip()
+        self.state["source_folder"] = str(self.state.get("source_folder") or "").strip()
         self.state_path.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
 
     def _save_config(self) -> None:
@@ -478,8 +523,23 @@ class ReupPipelineService:
         return str(self.state.get("video_folder") or "").strip()
 
     @property
+    def source_folder(self) -> str:
+        return str(self.state.get("source_folder") or "").strip()
+
+    @property
+    def workflow_mode(self) -> str:
+        mode = str(self.state.get("workflow_mode") or WORKFLOW_FULL).strip().lower()
+        return mode if mode in SUPPORTED_WORKFLOW_MODES else WORKFLOW_FULL
+
+    @property
     def language_codes_string(self) -> str:
         return " ".join(self.language_codes)
+
+    def _normalize_workflow_mode(self, raw_mode: str | None) -> str:
+        mode = str(raw_mode or "").strip().lower()
+        if mode not in SUPPORTED_WORKFLOW_MODES:
+            return WORKFLOW_FULL
+        return mode
 
     def _normalize_input_folder(self, raw_path: str | os.PathLike[str] | None) -> str:
         value = str(raw_path or "").strip()
@@ -528,38 +588,207 @@ class ReupPipelineService:
         paired_video_files = list(source_video_files)
         return source_music_files, source_video_files, paired_music_files, paired_video_files
 
-    def _current_pairing_lists(self) -> tuple[list[str], list[str]]:
+    def _build_full_workflow_rows(self) -> tuple[list[WorkflowRow], dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        source_music_files: list[str] = list(self.music_files)
+        source_video_files: list[str] = list(self.video_files)
+        paired_music_files, paired_video_files = self.music_files, self.video_files
         if self.music_folder or self.video_folder:
-            _source_music, _source_video, paired_music, paired_video = self._build_folder_pairings(
+            source_music_files, source_video_files, paired_music_files, paired_video_files = self._build_folder_pairings(
                 self.music_folder,
                 self.video_folder,
             )
-            return paired_music, paired_video
-        return self.music_files, self.video_files
+        pair_rows = build_pair_rows(paired_music_files, paired_video_files)
+        rows = [
+            WorkflowRow(
+                index=row.index,
+                output_base=row.output_base,
+                workflow_mode=WORKFLOW_FULL,
+                music_path=row.music_path,
+                video_path=row.video_path,
+                status=row.status,
+                output_mp4_path=str((self.output_dir / f"{row.output_base}.mp4").resolve(strict=False)),
+                output_m4a_path=str((self.output_dir / f"{row.output_base}.m4a").resolve(strict=False)),
+                processed_mp4_path=str((self.output_dir / f"{row.output_base}_processed.mp4").resolve(strict=False)),
+            )
+            for row in pair_rows
+        ]
+        if not rows and (self.music_folder or self.video_folder):
+            warnings.append("No valid full-workflow jobs were generated from the selected folders.")
+        return rows, {
+            "music_folder": self.music_folder,
+            "video_folder": self.video_folder,
+            "source_folder": "",
+            "source_music_count": len(source_music_files),
+            "source_video_count": len(source_video_files),
+            "paired_count": len(rows),
+        }, warnings
 
-    def _sync_current_inputs(self) -> list[PairRow]:
-        music_files, video_files = self._current_pairing_lists()
-        return self.sync_pairings_from_lists(music_files, video_files)
+    def _build_process_only_rows(self) -> tuple[list[WorkflowRow], dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        source_folder = self.source_folder
+        source_count = 0
+        rows: list[WorkflowRow] = []
+        if source_folder:
+            folder = Path(source_folder)
+            if not folder.exists():
+                raise RuntimeError(f"Folder not found: {folder}")
+            if not folder.is_dir():
+                raise RuntimeError(f"Path is not a folder: {folder}")
+            matches: list[tuple[int, Path]] = []
+            skipped_mp4 = 0
+            for path in sorted(folder.iterdir(), key=lambda item: (item.name.casefold(), str(item).casefold())):
+                if not path.is_file() or path.suffix.casefold() != ".mp4":
+                    continue
+                match = PROCESS_ONLY_RE.match(path.name)
+                if not match:
+                    skipped_mp4 += 1
+                    continue
+                matches.append((int(match.group(1)), path.resolve(strict=False)))
+            source_count = len(matches)
+            rows = [
+                WorkflowRow(
+                    index=index,
+                    output_base=f"output_{index}",
+                    workflow_mode=WORKFLOW_PROCESS_ONLY,
+                    music_path="",
+                    video_path=str(path),
+                    status="Ready",
+                    output_mp4_path=str(path),
+                    output_m4a_path=str(path.with_suffix(".m4a")),
+                    processed_mp4_path=str(path.with_name(f"{path.stem}_processed.mp4")),
+                )
+                for index, path in matches
+            ]
+            if skipped_mp4:
+                warnings.append(f"Ignored {skipped_mp4} mp4 file(s) that do not match output_*.mp4 in Source Folder.")
+            if not rows:
+                warnings.append("No output_*.mp4 files were found in Source Folder for Process Only.")
+        return rows, {
+            "music_folder": "",
+            "video_folder": "",
+            "source_folder": source_folder,
+            "source_music_count": 0,
+            "source_video_count": source_count,
+            "paired_count": len(rows),
+        }, warnings
+
+    def _build_upload_only_rows(self) -> tuple[list[WorkflowRow], dict[str, Any], list[str]]:
+        warnings: list[str] = []
+        source_folder = self.source_folder
+        rows: list[WorkflowRow] = []
+        processed_count = 0
+        audio_count = 0
+        if source_folder:
+            folder = Path(source_folder)
+            if not folder.exists():
+                raise RuntimeError(f"Folder not found: {folder}")
+            if not folder.is_dir():
+                raise RuntimeError(f"Path is not a folder: {folder}")
+            processed_by_index: dict[int, Path] = {}
+            audio_by_index: dict[int, Path] = {}
+            for path in sorted(folder.iterdir(), key=lambda item: (item.name.casefold(), str(item).casefold())):
+                if not path.is_file():
+                    continue
+                processed_match = UPLOAD_ONLY_PROCESSED_RE.match(path.name)
+                if processed_match:
+                    processed_by_index[int(processed_match.group(1))] = path.resolve(strict=False)
+                    continue
+                audio_match = UPLOAD_ONLY_AUDIO_RE.match(path.name)
+                if audio_match:
+                    audio_by_index[int(audio_match.group(1))] = path.resolve(strict=False)
+            processed_count = len(processed_by_index)
+            audio_count = len(audio_by_index)
+            valid_indexes = sorted(set(processed_by_index).intersection(audio_by_index))
+            rows = [
+                WorkflowRow(
+                    index=index,
+                    output_base=f"output_{index}",
+                    workflow_mode=WORKFLOW_UPLOAD_ONLY,
+                    music_path=str(audio_by_index[index]),
+                    video_path=str(processed_by_index[index]),
+                    status="Ready",
+                    output_mp4_path=str(folder / f"output_{index}.mp4"),
+                    output_m4a_path=str(audio_by_index[index]),
+                    processed_mp4_path=str(processed_by_index[index]),
+                )
+                for index in valid_indexes
+            ]
+            missing_audio = sorted(set(processed_by_index).difference(audio_by_index))
+            missing_processed = sorted(set(audio_by_index).difference(processed_by_index))
+            if missing_audio:
+                warnings.append(
+                    f"Skipped {len(missing_audio)} processed video file(s) that do not have matching output_*.m4a."
+                )
+            if missing_processed:
+                warnings.append(
+                    f"Skipped {len(missing_processed)} audio file(s) that do not have matching output_*_processed.mp4."
+                )
+            if not rows:
+                warnings.append("No valid output_*_processed.mp4 + output_*.m4a pairs were found in Source Folder.")
+        return rows, {
+            "music_folder": "",
+            "video_folder": "",
+            "source_folder": source_folder,
+            "source_music_count": audio_count,
+            "source_video_count": processed_count,
+            "paired_count": len(rows),
+        }, warnings
+
+    def _collect_workspace_rows(self) -> tuple[list[WorkflowRow], dict[str, Any], list[str]]:
+        mode = self.workflow_mode
+        if mode == WORKFLOW_PROCESS_ONLY:
+            return self._build_process_only_rows()
+        if mode == WORKFLOW_UPLOAD_ONLY:
+            return self._build_upload_only_rows()
+        return self._build_full_workflow_rows()
+
+    def _sync_current_inputs(self) -> list[WorkflowRow]:
+        rows, _overview, _warnings = self._collect_workspace_rows()
+        return self.sync_pairings_from_rows(rows)
 
     def get_input_overview(self) -> dict[str, Any]:
         with self._lock:
-            source_music_files: list[str] = list(self.music_files)
-            source_video_files: list[str] = list(self.video_files)
-            paired_music_files, paired_video_files = self.music_files, self.video_files
-            if self.music_folder or self.video_folder:
-                source_music_files, source_video_files, paired_music_files, paired_video_files = self._build_folder_pairings(
-                    self.music_folder,
-                    self.video_folder,
-                )
-            rows = build_pair_rows(paired_music_files, paired_video_files)
-            return {
-                "music_folder": self.music_folder,
-                "video_folder": self.video_folder,
-                "source_music_count": len(source_music_files),
-                "source_video_count": len(source_video_files),
-                "paired_count": len(rows),
-                "rows": rows,
-            }
+            rows, overview, warnings = self._collect_workspace_rows()
+            overview["workflow_mode"] = self.workflow_mode
+            overview["rows"] = rows
+            overview["warnings"] = warnings
+            return overview
+
+    def _output_artifact_bases(self) -> set[str]:
+        if not self.output_dir.exists():
+            return set()
+        bases: set[str] = set()
+        for path in self.output_dir.iterdir():
+            if not path.is_file():
+                continue
+            processed_match = UPLOAD_ONLY_PROCESSED_RE.match(path.name)
+            if processed_match:
+                bases.add(f"output_{int(processed_match.group(1))}")
+                continue
+            audio_match = UPLOAD_ONLY_AUDIO_RE.match(path.name)
+            if audio_match:
+                bases.add(f"output_{int(audio_match.group(1))}")
+                continue
+            render_match = PROCESS_ONLY_RE.match(path.name)
+            if render_match:
+                bases.add(f"output_{int(render_match.group(1))}")
+        return bases
+
+    def get_workspace_warnings(self) -> list[str]:
+        warnings = list(self.get_input_overview().get("warnings") or [])
+        active_bases = {row.output_base for row in self._sync_current_inputs()}
+        stale_job_count = sum(1 for job in self.state.get("jobs", {}).values() if job.get("stale"))
+        if stale_job_count:
+            warnings.append(
+                f"{stale_job_count} old job state entr{'y' if stale_job_count == 1 else 'ies'} are still kept locally. Use Clear or Reset Job State if you want a clean run."
+            )
+        stale_output_count = len(self._output_artifact_bases().difference(active_bases))
+        if stale_output_count:
+            warnings.append(
+                f"{stale_output_count} old output artifact(s) exist in reup_outputs and do not match the current workspace."
+            )
+        return warnings
 
     def add_log_handler(self, handler: logging.Handler) -> None:
         handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
@@ -569,19 +798,11 @@ class ReupPipelineService:
         if handler in self.logger.handlers:
             self.logger.removeHandler(handler)
 
-    def _job_artifacts(self, output_base: str) -> dict[str, str]:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "output_mp4": str((self.output_dir / f"{output_base}.mp4").resolve(strict=False)),
-            "output_m4a": str((self.output_dir / f"{output_base}.m4a").resolve(strict=False)),
-            "processed_mp4": str((self.output_dir / f"{output_base}_processed.mp4").resolve(strict=False)),
-        }
-
-    def _new_job(self, row: PairRow) -> dict[str, Any]:
-        artifacts = self._job_artifacts(row.output_base)
+    def _new_job(self, row: WorkflowRow) -> dict[str, Any]:
         return {
             "output_base": row.output_base,
             "index": row.index,
+            "workflow_mode": row.workflow_mode,
             "music_path": row.music_path,
             "video_path": row.video_path,
             "row_status": row.status,
@@ -596,13 +817,20 @@ class ReupPipelineService:
             "attempts": {"upload": 0, "create": 0, "premium": 0},
             "created_at": now_iso(),
             "updated_at": now_iso(),
-            **artifacts,
+            "output_mp4": row.output_mp4_path,
+            "output_m4a": row.output_m4a_path,
+            "processed_mp4": row.processed_mp4_path,
         }
 
-    def _job_sources_match(self, job: dict[str, Any], row: PairRow) -> bool:
+    def _job_sources_match(self, job: dict[str, Any], row: WorkflowRow) -> bool:
         return (
+            str(job.get("workflow_mode") or "") == row.workflow_mode
+            and
             normalize_path_string(job.get("music_path")) == normalize_path_string(row.music_path)
             and normalize_path_string(job.get("video_path")) == normalize_path_string(row.video_path)
+            and normalize_path_string(job.get("output_mp4")) == normalize_path_string(row.output_mp4_path)
+            and normalize_path_string(job.get("output_m4a")) == normalize_path_string(row.output_m4a_path)
+            and normalize_path_string(job.get("processed_mp4")) == normalize_path_string(row.processed_mp4_path)
         )
 
     def _reset_from_phase(self, job: dict[str, Any], phase: str) -> None:
@@ -674,25 +902,32 @@ class ReupPipelineService:
         if job.get("render_status") == RENDERED_STATUS:
             job["overall_status"] = RENDERED_STATUS
             return
+        workflow_mode = str(job.get("workflow_mode") or WORKFLOW_FULL)
+        if workflow_mode == WORKFLOW_UPLOAD_ONLY and job.get("process_status") == PROCESSED_STATUS:
+            job["overall_status"] = PROCESSED_STATUS
+            return
         job["overall_status"] = "Ready"
 
     def _refresh_job_artifact_state(self, job: dict[str, Any]) -> None:
+        workflow_mode = str(job.get("workflow_mode") or WORKFLOW_FULL)
         output_mp4 = Path(str(job.get("output_mp4") or ""))
         output_m4a = Path(str(job.get("output_m4a") or ""))
         processed_mp4 = Path(str(job.get("processed_mp4") or ""))
 
-        if job.get("render_status") == RENDERED_STATUS and (not output_mp4.exists() or not output_m4a.exists()):
+        if workflow_mode == WORKFLOW_UPLOAD_ONLY:
+            if output_m4a.exists() and processed_mp4.exists():
+                job["process_status"] = PROCESSED_STATUS
+            elif job.get("process_status") == PROCESSED_STATUS:
+                self._reset_from_phase(job, "process")
+        elif job.get("render_status") == RENDERED_STATUS and (not output_mp4.exists() or not output_m4a.exists()):
             self._reset_from_phase(job, "render")
         if job.get("process_status") == PROCESSED_STATUS and not processed_mp4.exists():
             self._reset_from_phase(job, "process")
         self._update_overall_status(job)
 
-    def sync_pairings_from_lists(self, music_files: list[str], video_files: list[str]) -> list[PairRow]:
+    def sync_pairings_from_rows(self, rows: list[WorkflowRow]) -> list[WorkflowRow]:
         with self._lock:
-            self.state["music_files"] = list(music_files)
-            self.state["video_files"] = list(video_files)
             jobs = self.state.setdefault("jobs", {})
-            rows = build_pair_rows(music_files, video_files)
             active_bases = set()
 
             for row in rows:
@@ -711,9 +946,12 @@ class ReupPipelineService:
                 else:
                     job = existing
                     job["index"] = row.index
+                    job["workflow_mode"] = row.workflow_mode
                     job["music_path"] = row.music_path
                     job["video_path"] = row.video_path
-                    job.update(self._job_artifacts(row.output_base))
+                    job["output_mp4"] = row.output_mp4_path
+                    job["output_m4a"] = row.output_m4a_path
+                    job["processed_mp4"] = row.processed_mp4_path
 
                 job["output_base"] = row.output_base
                 job["row_status"] = row.status
@@ -728,6 +966,28 @@ class ReupPipelineService:
 
             self._save_state()
             return rows
+
+    def sync_pairings_from_lists(self, music_files: list[str], video_files: list[str]) -> list[WorkflowRow]:
+        with self._lock:
+            self.state["workflow_mode"] = WORKFLOW_FULL
+            self.state["source_folder"] = ""
+            self.state["music_files"] = list(music_files)
+            self.state["video_files"] = list(video_files)
+        rows = [
+            WorkflowRow(
+                index=row.index,
+                output_base=row.output_base,
+                workflow_mode=WORKFLOW_FULL,
+                music_path=row.music_path,
+                video_path=row.video_path,
+                status=row.status,
+                output_mp4_path=str((self.output_dir / f"{row.output_base}.mp4").resolve(strict=False)),
+                output_m4a_path=str((self.output_dir / f"{row.output_base}.m4a").resolve(strict=False)),
+                processed_mp4_path=str((self.output_dir / f"{row.output_base}_processed.mp4").resolve(strict=False)),
+            )
+            for row in build_pair_rows(music_files, video_files)
+        ]
+        return self.sync_pairings_from_rows(rows)
 
     def get_display_rows(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -760,6 +1020,32 @@ class ReupPipelineService:
             self._save_state()
             return display_rows
 
+    def _row_is_failed(self, row: dict[str, Any]) -> bool:
+        return str(row.get("overall_status") or "").startswith("Error:")
+
+    def _row_is_pending(self, row: dict[str, Any]) -> bool:
+        return str(row.get("premium_status") or "") == PENDING_RETRY_STATUS
+
+    def _row_is_done(self, row: dict[str, Any]) -> bool:
+        return str(row.get("overall_status") or "") == PREMIUM_DONE_STATUS
+
+    def _row_is_active(self, row: dict[str, Any]) -> bool:
+        return not self._row_is_done(row) and not self._row_is_failed(row) and not self._row_is_pending(row)
+
+    def get_workspace_counts(self) -> dict[str, int]:
+        rows = self.get_display_rows()
+        failed_count = sum(1 for row in rows if self._row_is_failed(row))
+        pending_count = sum(1 for row in rows if self._row_is_pending(row))
+        done_count = sum(1 for row in rows if self._row_is_done(row))
+        remaining_count = sum(1 for row in rows if self._row_is_active(row))
+        return {
+            "total_count": len(rows),
+            "failed_count": failed_count,
+            "pending_count": pending_count,
+            "done_count": done_count,
+            "remaining_count": remaining_count,
+        }
+
     def get_job(self, output_base: str) -> dict[str, Any]:
         self._sync_current_inputs()
         job = self.state.setdefault("jobs", {}).get(output_base)
@@ -774,6 +1060,7 @@ class ReupPipelineService:
         lines = [
             f"State file: {self.state_path}",
             f"Machine: {self.machine_name} ({self.machine_key})",
+            f"Workflow: {self.workflow_mode}",
         ]
         if not rows:
             lines.append("No jobs recorded.")
@@ -787,26 +1074,46 @@ class ReupPipelineService:
         return lines
 
     def save_pairings(self, music_files: list[str], video_files: list[str]) -> None:
+        self.state["workflow_mode"] = WORKFLOW_FULL
         self.state["music_folder"] = ""
         self.state["video_folder"] = ""
+        self.state["source_folder"] = ""
         self.sync_pairings_from_lists(music_files, video_files)
         self.logger.info("Saved pairing state with %s music files and %s video files", len(music_files), len(video_files))
 
     def save_input_folders(self, music_folder: str, video_folder: str) -> None:
+        self.save_workspace_inputs(WORKFLOW_FULL, music_folder=music_folder, video_folder=video_folder)
+
+    def save_workspace_inputs(
+        self,
+        workflow_mode: str,
+        *,
+        music_folder: str = "",
+        video_folder: str = "",
+        source_folder: str = "",
+    ) -> None:
+        normalized_mode = self._normalize_workflow_mode(workflow_mode)
         normalized_music_folder = self._normalize_input_folder(music_folder)
         normalized_video_folder = self._normalize_input_folder(video_folder)
-        source_music_files, source_video_files, paired_music, paired_video = self._build_folder_pairings(
-            normalized_music_folder,
-            normalized_video_folder,
-        )
-        self.state["music_folder"] = normalized_music_folder
-        self.state["video_folder"] = normalized_video_folder
-        rows = self.sync_pairings_from_lists(paired_music, paired_video)
+        normalized_source_folder = self._normalize_input_folder(source_folder)
+        self.state["workflow_mode"] = normalized_mode
+        self.state["music_folder"] = normalized_music_folder if normalized_mode == WORKFLOW_FULL else ""
+        self.state["video_folder"] = normalized_video_folder if normalized_mode == WORKFLOW_FULL else ""
+        self.state["source_folder"] = normalized_source_folder if normalized_mode != WORKFLOW_FULL else ""
+        if normalized_mode == WORKFLOW_FULL:
+            self.state["music_files"] = []
+            self.state["video_files"] = []
+        else:
+            self.state["music_files"] = []
+            self.state["video_files"] = []
+        rows, overview, warnings = self._collect_workspace_rows()
+        self.sync_pairings_from_rows(rows)
+        warning_suffix = f" warnings={len(warnings)}" if warnings else ""
         self.logger.info(
-            "Saved folder inputs with %s music files, %s video files, %s generated rows",
-            len(source_music_files),
-            len(source_video_files),
-            len(rows),
+            "Saved workspace inputs for %s with %s generated rows%s",
+            normalized_mode,
+            int(overview["paired_count"]),
+            warning_suffix,
         )
 
     def _run_command(self, command: list[str]) -> None:
@@ -1175,9 +1482,153 @@ class ReupPipelineService:
         self._update_overall_status(job)
         self._save_state()
 
-    def _runnable_rows(self) -> list[PairRow]:
-        music_files, video_files = self._current_pairing_lists()
-        return build_pair_rows(music_files, video_files)
+    def _runnable_rows(self) -> list[WorkflowRow]:
+        rows, _overview, _warnings = self._collect_workspace_rows()
+        return rows
+
+    def _job_can_render(self, job: dict[str, Any]) -> bool:
+        return str(job.get("workflow_mode") or WORKFLOW_FULL) == WORKFLOW_FULL and job.get("render_status") != RENDERED_STATUS
+
+    def _job_can_process(self, job: dict[str, Any]) -> bool:
+        workflow_mode = str(job.get("workflow_mode") or WORKFLOW_FULL)
+        if job.get("process_status") == PROCESSED_STATUS:
+            return False
+        if workflow_mode == WORKFLOW_FULL:
+            return job.get("render_status") == RENDERED_STATUS
+        if workflow_mode == WORKFLOW_PROCESS_ONLY:
+            return bool(str(job.get("output_mp4") or "").strip())
+        return False
+
+    def _job_can_upload(self, job: dict[str, Any]) -> bool:
+        return job.get("process_status") == PROCESSED_STATUS and not str(job.get("video_id") or "").strip()
+
+    def _job_can_premium(self, job: dict[str, Any]) -> bool:
+        return bool(str(job.get("video_id") or "").strip()) and job.get("premium_status") != PREMIUM_DONE_STATUS
+
+    def _next_phase_name(self) -> str:
+        if any(row.status == "Ready" and self._job_can_render(self.get_job(row.output_base)) for row in self._runnable_rows()):
+            return "render"
+        if any(
+            row.status == "Ready"
+            and self._job_can_process(self.get_job(row.output_base))
+            for row in self._runnable_rows()
+        ):
+            return "process"
+        if any(
+            row.status == "Ready"
+            and self._job_can_upload(self.get_job(row.output_base))
+            for row in self._runnable_rows()
+        ):
+            return "upload"
+        if any(
+            row.status == "Ready"
+            and self._job_can_premium(self.get_job(row.output_base))
+            for row in self._runnable_rows()
+        ):
+            return "premium"
+        return "idle"
+
+    def _phase_target_bases(self, phase: str) -> tuple[int, list[str]]:
+        rows = list(self._runnable_rows())
+        total_ready = sum(1 for row in rows if row.status == "Ready")
+        target_bases: list[str] = []
+        for row in rows:
+            if row.status != "Ready":
+                continue
+            job = self.get_job(row.output_base)
+            can_run = False
+            if phase == "render":
+                can_run = self._job_can_render(job)
+            elif phase == "process":
+                can_run = self._job_can_process(job)
+            elif phase == "upload":
+                can_run = self._job_can_upload(job)
+            elif phase == "premium":
+                can_run = self._job_can_premium(job)
+            if can_run:
+                target_bases.append(row.output_base)
+        return total_ready, target_bases
+
+    def _phase_target_outcome(self, phase: str, job: dict[str, Any]) -> str:
+        if phase == "render":
+            if job.get("render_status") == RENDERED_STATUS:
+                return "done"
+            if job.get("render_status") == "Error":
+                return "failed"
+            return "skipped"
+        if phase == "process":
+            if job.get("process_status") == PROCESSED_STATUS:
+                return "done"
+            if job.get("process_status") == "Error":
+                return "failed"
+            return "skipped"
+        if phase == "upload":
+            if job.get("upload_status") == VIDEO_CREATED_STATUS:
+                return "done"
+            if job.get("upload_status") == "Error":
+                return "failed"
+            return "skipped"
+        if phase == "premium":
+            if job.get("premium_status") == PREMIUM_DONE_STATUS:
+                return "done"
+            if job.get("premium_status") == PENDING_RETRY_STATUS:
+                return "pending"
+            if job.get("premium_status") == "Error":
+                return "failed"
+            return "skipped"
+        return "skipped"
+
+    def run_phase_action(self, action: str) -> PhaseRunSummary:
+        normalized = str(action or "").strip().lower()
+        phase = self._next_phase_name() if normalized == "next" else normalized
+        if phase not in {"render", "process", "upload", "premium"}:
+            return PhaseRunSummary(
+                action=normalized or "next",
+                phase="idle",
+                total_ready=0,
+                target_count=0,
+                done=0,
+                failed=0,
+                pending=0,
+                skipped=0,
+            )
+
+        total_ready, target_bases = self._phase_target_bases(phase)
+        if phase == "render":
+            self.render_ready()
+        elif phase == "process":
+            self.process_ready()
+        elif phase == "upload":
+            self.upload_ready()
+        else:
+            self.add_premium_ready()
+
+        done = 0
+        failed = 0
+        pending = 0
+        skipped_inside_targets = 0
+        for output_base in target_bases:
+            job = self.get_job(output_base)
+            outcome = self._phase_target_outcome(phase, job)
+            if outcome == "done":
+                done += 1
+            elif outcome == "failed":
+                failed += 1
+            elif outcome == "pending":
+                pending += 1
+            else:
+                skipped_inside_targets += 1
+        skipped = max(total_ready - len(target_bases), 0) + skipped_inside_targets
+        return PhaseRunSummary(
+            action=normalized or phase,
+            phase=phase,
+            total_ready=total_ready,
+            target_count=len(target_bases),
+            done=done,
+            failed=failed,
+            pending=pending,
+            skipped=skipped,
+        )
 
     def render_ready(self) -> int:
         with self._lock:
@@ -1188,7 +1639,7 @@ class ReupPipelineService:
             if row.status != "Ready":
                 continue
             job = self.get_job(row.output_base)
-            if job.get("render_status") == RENDERED_STATUS:
+            if not self._job_can_render(job):
                 continue
             try:
                 self.render_job(job)
@@ -1207,7 +1658,7 @@ class ReupPipelineService:
             if row.status != "Ready":
                 continue
             job = self.get_job(row.output_base)
-            if job.get("render_status") != RENDERED_STATUS or job.get("process_status") == PROCESSED_STATUS:
+            if not self._job_can_process(job):
                 continue
             try:
                 self.process_job(job)
@@ -1226,7 +1677,7 @@ class ReupPipelineService:
             if row.status != "Ready":
                 continue
             job = self.get_job(row.output_base)
-            if job.get("process_status") != PROCESSED_STATUS or str(job.get("video_id") or "").strip():
+            if not self._job_can_upload(job):
                 continue
             try:
                 self.upload_job(job)
@@ -1245,7 +1696,7 @@ class ReupPipelineService:
             if row.status != "Ready":
                 continue
             job = self.get_job(row.output_base)
-            if not str(job.get("video_id") or "").strip() or job.get("premium_status") == PREMIUM_DONE_STATUS:
+            if not self._job_can_premium(job):
                 continue
             try:
                 self.premium_job(job)
@@ -1256,28 +1707,14 @@ class ReupPipelineService:
         return count
 
     def run_next_phase(self) -> tuple[str, int]:
-        if any(row.status == "Ready" and self.get_job(row.output_base).get("render_status") != RENDERED_STATUS for row in self._runnable_rows()):
+        next_phase = self._next_phase_name()
+        if next_phase == "render":
             return "render", self.render_ready()
-        if any(
-            row.status == "Ready"
-            and self.get_job(row.output_base).get("render_status") == RENDERED_STATUS
-            and self.get_job(row.output_base).get("process_status") != PROCESSED_STATUS
-            for row in self._runnable_rows()
-        ):
+        if next_phase == "process":
             return "process", self.process_ready()
-        if any(
-            row.status == "Ready"
-            and self.get_job(row.output_base).get("process_status") == PROCESSED_STATUS
-            and not str(self.get_job(row.output_base).get("video_id") or "").strip()
-            for row in self._runnable_rows()
-        ):
+        if next_phase == "upload":
             return "upload", self.upload_ready()
-        if any(
-            row.status == "Ready"
-            and str(self.get_job(row.output_base).get("video_id") or "").strip()
-            and self.get_job(row.output_base).get("premium_status") != PREMIUM_DONE_STATUS
-            for row in self._runnable_rows()
-        ):
+        if next_phase == "premium":
             return "premium", self.add_premium_ready()
         self.logger.info("No runnable phase found.")
         return "idle", 0
@@ -1297,6 +1734,45 @@ class ReupPipelineService:
             self._update_overall_status(job)
             self._save_state()
             self.logger.info("Reset %s for retry", output_base)
+
+    def retry_all_failed(self) -> int:
+        with self._lock:
+            rows = list(self.get_display_rows())
+            targets = [
+                row["output_base"]
+                for row in rows
+                if self._row_is_failed(row) or self._row_is_pending(row)
+            ]
+        for output_base in targets:
+            self.retry_job(output_base)
+        self.logger.info("Reset %s failed/pending job(s) for retry.", len(targets))
+        return len(targets)
+
+    def clear_workspace(self) -> None:
+        with self._lock:
+            self.state["music_folder"] = ""
+            self.state["video_folder"] = ""
+            self.state["source_folder"] = ""
+            self.state["music_files"] = []
+            self.state["video_files"] = []
+            for job in self.state.get("jobs", {}).values():
+                job["stale"] = True
+                job["updated_at"] = now_iso()
+            self._save_state()
+            self.logger.info("Cleared current workspace inputs.")
+
+    def reset_job_state(self) -> None:
+        with self._lock:
+            rows, _overview, _warnings = self._collect_workspace_rows()
+            active_bases = {row.output_base for row in rows}
+            jobs = self.state.setdefault("jobs", {})
+            if active_bases:
+                for base_name in active_bases:
+                    jobs.pop(base_name, None)
+            else:
+                jobs.clear()
+            self._save_state()
+            self.logger.info("Reset job state for %s active base(s).", len(active_bases))
 
     def shutdown(self) -> None:
         if hasattr(self.backend, "shutdown"):

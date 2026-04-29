@@ -60,6 +60,7 @@ class WebUIController:
         self._activity = "Ready"
         self._last_error = ""
         self._last_message = ""
+        self._last_message_tone = "idle"
 
     def _set_busy(self, value: bool, message: str) -> None:
         with self._lock:
@@ -68,6 +69,7 @@ class WebUIController:
 
     def _summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         input_overview = self.service.get_input_overview()
+        workspace_counts = self.service.get_workspace_counts()
         return {
             "music_count": int(input_overview["source_music_count"]),
             "video_count": int(input_overview["source_video_count"]),
@@ -77,6 +79,7 @@ class WebUIController:
                 for row in rows
                 if row["overall_status"] in {"Ready", RENDERED_STATUS, PROCESSED_STATUS, VIDEO_CREATED_STATUS, PREMIUM_DONE_STATUS}
             ),
+            **workspace_counts,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -88,15 +91,19 @@ class WebUIController:
             "activity": self._activity,
             "last_error": self._last_error,
             "last_message": self._last_message,
+            "last_message_tone": self._last_message_tone,
             "machine_name": self.service.machine_name,
             "machine_key": self.service.machine_key,
             "state_file": str(self.service.state_path),
             "output_dir": str(self.service.output_dir),
             "selected_channel": self.service.channel_folder_name,
             "channels": self.service.get_available_channels(),
+            "workflow_mode": input_overview["workflow_mode"],
             "rows": rows,
             "music_folder": input_overview["music_folder"],
             "video_folder": input_overview["video_folder"],
+            "source_folder": input_overview["source_folder"],
+            "warnings": self.service.get_workspace_warnings(),
             "input_rows": [
                 {
                     "index": row.index,
@@ -109,24 +116,45 @@ class WebUIController:
             "summary": self._summary(rows),
         }
 
-    def save_folders(self, music_folder: str, video_folder: str) -> dict[str, Any]:
-        self.service.save_input_folders(music_folder, video_folder)
-        self._last_message = "Folders saved."
+    def save_workspace(self, workflow_mode: str, music_folder: str, video_folder: str, source_folder: str) -> dict[str, Any]:
+        self.service.save_workspace_inputs(
+            workflow_mode,
+            music_folder=music_folder,
+            video_folder=video_folder,
+            source_folder=source_folder,
+        )
+        self._last_message = "Workspace saved."
+        self._last_message_tone = "success"
         return self.snapshot()
 
     def clear_rows(self) -> dict[str, Any]:
-        self.service.save_input_folders("", "")
-        self._last_message = "Folders cleared."
+        self.service.clear_workspace()
+        self._last_message = "Workspace cleared."
+        self._last_message_tone = "success"
+        return self.snapshot()
+
+    def reset_job_state(self) -> dict[str, Any]:
+        self.service.reset_job_state()
+        self._last_message = "Job state reset for the current workspace."
+        self._last_message_tone = "success"
         return self.snapshot()
 
     def set_channel(self, channel: str) -> dict[str, Any]:
         self.service.set_channel_folder_name(channel)
         self._last_message = f"Channel switched to {channel}."
+        self._last_message_tone = "success"
         return self.snapshot()
 
     def retry(self, output_base: str) -> dict[str, Any]:
         self.service.retry_job(output_base)
         self._last_message = f"Retry queued for {output_base}."
+        self._last_message_tone = "success"
+        return self.snapshot()
+
+    def retry_all_failed(self) -> dict[str, Any]:
+        count = self.service.retry_all_failed()
+        self._last_message = f"Retry queued for {count} failed/pending job(s)."
+        self._last_message_tone = "success"
         return self.snapshot()
 
     def logs(self, limit: int = 200) -> dict[str, Any]:
@@ -138,11 +166,11 @@ class WebUIController:
 
     def run_action_async(self, action: str) -> dict[str, Any]:
         actions = {
-            "render": ("Render Ready", self.service.render_ready),
-            "process": ("Process Ready", self.service.process_ready),
-            "upload": ("Upload Ready", self.service.upload_ready),
-            "premium": ("Add Premium Ready", self.service.add_premium_ready),
-            "next": ("Run Next Phase", self.service.run_next_phase),
+            "render": "Render",
+            "process": "Process",
+            "upload": "Upload",
+            "premium": "Add Premium",
+            "next": "Run Next Phase",
         }
         if action not in actions:
             raise RuntimeError(f"Unsupported action: {action}")
@@ -150,33 +178,41 @@ class WebUIController:
         with self._lock:
             if self._busy:
                 raise RuntimeError("Another action is still running.")
-            label, callback = actions[action]
+            label = actions[action]
             self._busy = True
             self._activity = f"{label} is running..."
             self._last_error = ""
             self._last_message = ""
+            self._last_message_tone = "running"
 
         def worker() -> None:
             try:
-                result = callback()
-                if action == "next":
-                    phase, count = result
-                    if phase == "idle":
-                        message = "No runnable phase found."
-                    else:
-                        message = f"Ran phase `{phase}`. Jobs handled: {count}"
+                summary = self.service.run_phase_action(action)
+                if summary.phase == "idle":
+                    message = "No runnable phase found."
+                    tone = "idle"
                 else:
-                    message = f"{label} completed."
+                    message = (
+                        f"{label} finished: done {summary.done}, failed {summary.failed}, "
+                        f"skipped {summary.skipped}, pending {summary.pending}"
+                    )
+                    tone = "warning" if (summary.failed or summary.pending) else "success"
+                    if action == "next":
+                        message = (
+                            f"Run Next Phase -> {summary.phase}: done {summary.done}, failed {summary.failed}, "
+                            f"skipped {summary.skipped}, pending {summary.pending}"
+                        )
                 with self._lock:
                     self._busy = False
                     self._activity = "Ready"
                     self._last_message = message
+                    self._last_message_tone = tone
             except Exception as exc:
                 with self._lock:
                     self._busy = False
                     self._activity = "Ready"
                     self._last_error = str(exc)
-
+                    self._last_message_tone = "error"
         threading.Thread(target=worker, daemon=True).start()
         return self.snapshot()
 
@@ -243,31 +279,41 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if parsed.path == "/api/folders":
                 self._send_json(
-                    self.controller.save_folders(
+                    self.controller.save_workspace(
+                        str(payload.get("workflow_mode") or ""),
                         str(payload.get("music_folder") or ""),
                         str(payload.get("video_folder") or ""),
+                        str(payload.get("source_folder") or ""),
                     )
                 )
                 return
             if parsed.path == "/api/rows":
                 if "music_folder" in payload or "video_folder" in payload:
                     self._send_json(
-                        self.controller.save_folders(
+                        self.controller.save_workspace(
+                            str(payload.get("workflow_mode") or ""),
                             str(payload.get("music_folder") or ""),
                             str(payload.get("video_folder") or ""),
+                            str(payload.get("source_folder") or ""),
                         )
                     )
                     return
-                self._send_json(self.controller.save_folders("", ""))
+                self._send_json(self.controller.save_workspace("", "", "", ""))
                 return
             if parsed.path == "/api/clear":
                 self._send_json(self.controller.clear_rows())
+                return
+            if parsed.path == "/api/reset-job-state":
+                self._send_json(self.controller.reset_job_state())
                 return
             if parsed.path == "/api/channel":
                 self._send_json(self.controller.set_channel(str(payload.get("channel") or "")))
                 return
             if parsed.path == "/api/retry":
                 self._send_json(self.controller.retry(str(payload.get("output_base") or "")))
+                return
+            if parsed.path == "/api/retry-all-failed":
+                self._send_json(self.controller.retry_all_failed())
                 return
             if parsed.path == "/api/action":
                 self._send_json(self.controller.run_action_async(str(payload.get("action") or "")))

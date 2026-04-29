@@ -108,10 +108,19 @@ input {
   align-items: end;
 }
 
+.top-controls {
+  display: flex;
+  gap: 14px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.workflow-box,
 .channel-box {
   min-width: 240px;
 }
 
+.workflow-box label,
 .channel-box label {
   display: block;
   margin-bottom: 8px;
@@ -129,11 +138,50 @@ input {
   gap: 10px;
 }
 
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.stat-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: #fff;
+  border: 1px solid rgba(16, 24, 40, 0.06);
+}
+
+.stat-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.stat-card strong {
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+.filter-caption {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .folder-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(280px, 1fr));
   gap: 14px;
   margin-top: 8px;
+}
+
+.single-field {
+  grid-template-columns: minmax(280px, 1fr);
 }
 
 .field-block {
@@ -156,6 +204,12 @@ input {
 
 .workspace-flow {
   margin-top: 16px;
+}
+
+.workspace-secondary-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .status-banner {
@@ -202,6 +256,16 @@ input {
   color: var(--green);
 }
 
+.status-warning {
+  background: rgba(154, 103, 0, 0.08);
+  border-color: rgba(154, 103, 0, 0.18);
+}
+
+.status-warning .status-title,
+.status-warning .message-line {
+  color: var(--amber);
+}
+
 .status-error {
   background: rgba(192, 54, 44, 0.1);
   border-color: rgba(192, 54, 44, 0.18);
@@ -210,6 +274,22 @@ input {
 .status-error .status-title,
 .status-error .message-line {
   color: var(--red);
+}
+
+.warning-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.warning-item {
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(154, 103, 0, 0.18);
+  background: rgba(154, 103, 0, 0.08);
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 button,
@@ -248,8 +328,18 @@ button.subtle {
   font-size: 13px;
 }
 
+button.utility-button {
+  color: var(--muted);
+  border-color: rgba(16, 24, 40, 0.08);
+  background: transparent;
+}
+
 button.is-hidden {
   display: none;
+}
+
+.is-hidden {
+  display: none !important;
 }
 
 button.is-dimmed {
@@ -391,6 +481,10 @@ th {
 
   .folder-form {
     grid-template-columns: 1fr;
+  }
+
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 
   th,

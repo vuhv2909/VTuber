@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>YT Reup Tool</title>
+  <title>TV Media</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -16,17 +16,27 @@
     </header>
 
     <section class="card control-card">
-      <div class="card-head compact-head">
-        <div>
-          <h2>Workspace</h2>
+        <div class="card-head compact-head">
+          <div>
+            <h2>Workspace</h2>
+          </div>
+          <div class="top-controls">
+            <div class="workflow-box">
+              <label for="workflowSelect">Workflow</label>
+              <select id="workflowSelect">
+                <option value="full">Full Workflow</option>
+                <option value="process_only">Process Only</option>
+                <option value="upload_only">Upload + Add Premium</option>
+              </select>
+            </div>
+            <div class="channel-box">
+              <label for="channelSelect">Channel</label>
+              <select id="channelSelect"></select>
+            </div>
+          </div>
         </div>
-        <div class="channel-box">
-          <label for="channelSelect">Channel</label>
-          <select id="channelSelect"></select>
-        </div>
-      </div>
 
-      <div class="folder-form">
+      <div class="folder-form" id="fullFolderForm">
         <label class="field-block" for="musicFolderInput">
           <span>Music Folder</span>
           <input type="text" id="musicFolderInput" placeholder="D:\Music\Album A">
@@ -37,9 +47,17 @@
         </label>
       </div>
 
+      <div class="folder-form single-field is-hidden" id="sourceFolderForm">
+        <label class="field-block" for="sourceFolderInput">
+          <span id="sourceFolderLabel">Source Folder</span>
+          <input type="text" id="sourceFolderInput" placeholder="D:\Batch\Source">
+        </label>
+      </div>
+
       <div class="toolbar">
         <button class="ghost" id="saveFoldersBtn">Apply Folders</button>
         <button class="ghost" id="clearFoldersBtn">Clear</button>
+        <button class="ghost" id="retryAllFailedBtn">Retry All Failed</button>
       </div>
 
       <div class="workspace-flow">
@@ -54,6 +72,10 @@
           <p class="status-title" id="statusTitle">Ready</p>
           <p class="message-line" id="messageLine">Choose folders and run a phase.</p>
         </div>
+        <div class="warning-list is-hidden" id="warningList"></div>
+        <div class="workspace-secondary-actions">
+          <button class="subtle utility-button" id="resetJobStateBtn">Reset Job State</button>
+        </div>
       </div>
     </section>
 
@@ -62,7 +84,26 @@
         <div>
           <h2>Pipeline Table</h2>
         </div>
+        <div class="top-controls">
+          <div class="workflow-box">
+            <label for="rowFilterSelect">Filter</label>
+            <select id="rowFilterSelect">
+              <option value="all">All</option>
+              <option value="failed">Failed</option>
+              <option value="pending">Pending</option>
+              <option value="done">Done</option>
+              <option value="active">Active</option>
+            </select>
+          </div>
+        </div>
       </div>
+      <div class="stats-row" id="workspaceStats">
+        <div class="stat-card"><span class="stat-label">Failed</span><strong id="failedCount">0</strong></div>
+        <div class="stat-card"><span class="stat-label">Pending</span><strong id="pendingCount">0</strong></div>
+        <div class="stat-card"><span class="stat-label">Done</span><strong id="doneCount">0</strong></div>
+        <div class="stat-card"><span class="stat-label">Remaining</span><strong id="remainingCount">0</strong></div>
+      </div>
+      <p class="filter-caption" id="filterCaption">Showing All</p>
       <div class="table-wrap">
         <table class="pipeline-table">
           <thead>
