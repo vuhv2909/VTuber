@@ -18,6 +18,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+from .backend_base import ReupBackend
+from .backend_yamastertub import create_backend
 from .pairing import PairRow, build_pair_rows
 
 APP_TITLE = "YT Reup Tool"
@@ -172,107 +174,12 @@ class QueueLogHandler(logging.Handler):
             return
 
 
-class YaMasterTubBackend:
-    def __init__(self, root: Path, logs_dir: Path, logger: logging.Logger):
-        self.root = root.resolve()
-        self.logs_dir = logs_dir
-        self.logger = logger
-        self._api = None
-        self._checker_proc: subprocess.Popen[str] | None = None
-        self._checker_log_handle = None
-
-    def _ensure_api(self):
-        if self._api is not None:
-            return self._api
-
-        if str(self.root) not in sys.path:
-            sys.path.insert(0, str(self.root))
-
-        with pushd(self.root):
-            import app.api_handlers as api_handlers  # type: ignore
-
-        self._api = api_handlers
-        return self._api
-
-    def _call(self, name: str, *args):
-        api = self._ensure_api()
-        with pushd(self.root):
-            return getattr(api, name)(*args)
-
-    def get_channels(self) -> list[str]:
-        return list(self._call("getChannels") or [])
-
-    def get_language_codes(self) -> str:
-        return str(self._call("getLanguageCodes") or "")
-
-    def save_language_codes(self, language_codes: str) -> Any:
-        return self._call("saveLanguageCodes", language_codes)
-
-    def get_aas_config(self) -> dict[str, Any]:
-        return parse_json_maybe(self._call("getAudioSubtitlesVideosChannels"), {})
-
-    def save_aas_config(self, config: dict[str, Any]) -> Any:
-        return self._call("saveAudioSubtitlesVideosChannels", config)
-
-    def upload_video_file(self, channel_folder_name: str, index: int) -> Any:
-        return self._call("AAS_uploadVideoFile", channel_folder_name, index)
-
-    def create_video(self, channel_folder_name: str, index: int) -> Any:
-        return self._call("AAS_createVideo", channel_folder_name, index)
-
-    def add_subtitles_premium(self) -> Any:
-        return self._call("addSubtitlesPremium")
-
-    def is_aas_checker_running(self) -> bool:
-        try:
-            return bool(self._call("AAS_isCheckDeleteVideoRunning"))
-        except Exception as exc:
-            self.logger.warning("Could not query AAS checker status: %s", exc)
-            return False
-
-    def ensure_aas_checker_running(self) -> bool:
-        if self.is_aas_checker_running():
-            if self._checker_proc is not None and self._checker_proc.poll() is not None:
-                self.logger.warning("Local AAS checker process exited; external checker is still running.")
-            return False
-
-        log_path = self.logs_dir / "aas_check_delete_video.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._checker_log_handle = log_path.open("a", encoding="utf-8")
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._checker_proc = subprocess.Popen(
-            [sys.executable, "AAS_check_delete_video.py"],
-            cwd=str(self.root),
-            stdout=self._checker_log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=creationflags,
-        )
-        self.logger.info("Started AAS_check_delete_video.py (pid=%s)", self._checker_proc.pid)
-        time.sleep(2.0)
-        return True
-
-    def shutdown(self) -> None:
-        proc = self._checker_proc
-        if proc is not None and proc.poll() is None:
-            self.logger.info("Stopping AAS_check_delete_video.py (pid=%s)", proc.pid)
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        self._checker_proc = None
-        if self._checker_log_handle is not None:
-            self._checker_log_handle.close()
-            self._checker_log_handle = None
-
-
 class ReupPipelineService:
     def __init__(
         self,
         config_path: Path | None = None,
         state_path: Path | None = None,
-        backend: Any | None = None,
+        backend: ReupBackend | None = None,
     ):
         package_dir = Path(__file__).resolve().parent
         self.bundle_root = package_dir.parent
@@ -292,11 +199,12 @@ class ReupPipelineService:
         self.config = self._load_or_create_config()
         self.state = self._load_or_create_state()
         self.language_codes = list(self.config.get("language_codes") or DEFAULT_LANGUAGE_CODES)
+        self.backend_type = str(self.config.get("backend_type") or "yamastertub").strip().lower()
         self.yamastertub_root = self._resolve_configured_path(self.config["yamastertub_root"])
         self.output_dir = self._resolve_configured_path(self.config["output_dir"])
         self.ffmpeg_bin = self._resolve_binary(self.config.get("ffmpeg_path") or "ffmpeg")
         self.ffprobe_bin = self._resolve_binary(self.config.get("ffprobe_path") or "ffprobe")
-        self.backend = backend or YaMasterTubBackend(self.yamastertub_root, self.logs_dir, self.logger)
+        self.backend = backend or create_backend(self.yamastertub_root, self.logs_dir, self.logger, self.backend_type)
         self._ffmpeg_encoder_text: str | None = None
 
         self._validate_runtime()
@@ -346,6 +254,9 @@ class ReupPipelineService:
         if self.config_path.exists():
             config = json.loads(self.config_path.read_text(encoding="utf-8-sig"))
             changed = False
+            if "backend_type" not in config:
+                config["backend_type"] = "yamastertub"
+                changed = True
             if "auto_start_aas_delete_checker" not in config:
                 config["auto_start_aas_delete_checker"] = False
                 changed = True
@@ -354,6 +265,7 @@ class ReupPipelineService:
             return config
 
         config = {
+            "backend_type": "yamastertub",
             "yamastertub_root": os.path.relpath(self._default_yamastertub_root(), start=self.config_path.parent),
             "channel_folder_name": self._default_channel_name(),
             "language_codes": DEFAULT_LANGUAGE_CODES,
@@ -380,7 +292,36 @@ class ReupPipelineService:
         }
 
     def _load_state_file(self, path: Path) -> dict[str, Any]:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        try:
+            raw_text = path.read_text(encoding="utf-8-sig")
+        except OSError as exc:
+            self.logger.warning("Could not read state file %s: %s. Starting with a clean state.", path, exc)
+            return self._blank_state()
+        if not raw_text.strip():
+            self.logger.warning("State file %s is empty. Starting with a clean state.", path)
+            return self._blank_state()
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            backup_path = path.with_suffix(path.suffix + f".broken-{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            try:
+                path.replace(backup_path)
+            except OSError:
+                backup_path = None
+            if backup_path is not None:
+                self.logger.warning(
+                    "State file %s is invalid JSON (%s). Renamed it to %s and starting with a clean state.",
+                    path,
+                    exc,
+                    backup_path,
+                )
+            else:
+                self.logger.warning(
+                    "State file %s is invalid JSON (%s). Starting with a clean state.",
+                    path,
+                    exc,
+                )
+            return self._blank_state()
 
     def _normalize_loaded_state(self, data: dict[str, Any] | None) -> dict[str, Any]:
         source = data or {}
@@ -463,17 +404,14 @@ class ReupPipelineService:
             raise RuntimeError(f"ffprobe not found: {self.ffprobe_bin}")
 
         if not self.yamastertub_root.exists():
-            raise RuntimeError(f"YaMasterTub root not found: {self.yamastertub_root}")
+            raise RuntimeError(f"Backend root not found for {self.backend_type}: {self.yamastertub_root}")
 
-        storage_dir = self.yamastertub_root / "storage"
-        required_paths = [
-            storage_dir / "audio-subtitles-videos-channels.json",
-            storage_dir / "language-codes.txt",
-            self.yamastertub_root / "AAS_check_delete_video.py",
-        ]
-        missing = [str(path) for path in required_paths if not path.exists()]
+        required_local_paths = getattr(self.backend, "required_local_paths", None)
+        paths_to_check = list(required_local_paths()) if callable(required_local_paths) else []
+        missing = [str(path) for path in paths_to_check if not path.exists()]
         if missing:
-            raise RuntimeError(f"Missing required YaMasterTub files: {', '.join(missing)}")
+            backend_name = str(getattr(self.backend, "backend_name", self.backend_type) or self.backend_type)
+            raise RuntimeError(f"Missing required backend files for {backend_name}: {', '.join(missing)}")
 
         channels = list(self.backend.get_channels() or [])
         channel_name = self.channel_folder_name
