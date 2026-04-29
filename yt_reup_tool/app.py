@@ -628,6 +628,7 @@ class ReupPipelineService:
         warnings: list[str] = []
         source_folder = self.source_folder
         source_count = 0
+        already_processed_count = 0
         rows: list[WorkflowRow] = []
         if source_folder:
             folder = Path(source_folder)
@@ -644,7 +645,12 @@ class ReupPipelineService:
                 if not match:
                     skipped_mp4 += 1
                     continue
-                matches.append((int(match.group(1)), path.resolve(strict=False)))
+                resolved = path.resolve(strict=False)
+                processed_path = resolved.with_name(f"{resolved.stem}_processed.mp4")
+                if processed_path.exists():
+                    already_processed_count += 1
+                    continue
+                matches.append((int(match.group(1)), resolved))
             source_count = len(matches)
             rows = [
                 WorkflowRow(
@@ -662,8 +668,15 @@ class ReupPipelineService:
             ]
             if skipped_mp4:
                 warnings.append(f"Ignored {skipped_mp4} mp4 file(s) that do not match output_*.mp4 in Source Folder.")
+            if already_processed_count:
+                warnings.append(
+                    f"Skipped {already_processed_count} output_*.mp4 file(s) that already have matching output_*_processed.mp4."
+                )
             if not rows:
-                warnings.append("No output_*.mp4 files were found in Source Folder for Process Only.")
+                if already_processed_count:
+                    warnings.append("No pending output_*.mp4 files remain in Source Folder for Process Only.")
+                else:
+                    warnings.append("No output_*.mp4 files were found in Source Folder for Process Only.")
         return rows, {
             "music_folder": "",
             "video_folder": "",
