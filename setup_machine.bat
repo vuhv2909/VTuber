@@ -2,10 +2,10 @@
 setlocal
 pushd "%~dp0"
 
-echo Checking Python 3.12...
-py -3.12 -c "import sys; print(sys.version)" >nul 2>nul
+echo Checking Python 3.10+...
+py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
 if errorlevel 1 (
-    echo Python 3.12 was not found.
+    echo Python 3.10 or newer was not found.
     exit /b 1
 )
 
@@ -38,7 +38,7 @@ if not exist "C:\YAMasterTub\storage\language-codes.txt" (
 )
 
 echo Checking tool startup...
-py -3.12 -m yt_reup_tool status
+py -3 -m yt_reup_tool status
 if errorlevel 1 (
     echo Tool status check failed.
     exit /b 1

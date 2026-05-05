@@ -18,7 +18,7 @@ Files:
 
 Use on another machine:
 1. Copy this whole folder.
-2. Make sure Python 3.12 is installed.
+2. Make sure Python 3.10 or newer is installed.
 3. Make sure ffmpeg and ffprobe are in PATH.
 4. Make sure YAMasterTub exists at C:\YAMasterTub and has your channels/cookies.
 5. Run setup_machine.bat.

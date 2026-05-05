@@ -442,8 +442,8 @@ class ReupPipelineService:
         return found or raw_value
 
     def _validate_runtime(self) -> None:
-        if sys.version_info[:2] != (3, 12):
-            raise RuntimeError("yt_reup_tool must run on Python 3.12.")
+        if sys.version_info < (3, 10):
+            raise RuntimeError("yt_reup_tool requires Python 3.10 or newer.")
 
         if shutil.which(self.ffmpeg_bin) is None and not Path(self.ffmpeg_bin).exists():
             raise RuntimeError(f"ffmpeg not found: {self.ffmpeg_bin}")
