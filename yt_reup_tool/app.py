@@ -243,6 +243,8 @@ class ReupPipelineService:
         self.ffprobe_bin = self._resolve_binary(self.config.get("ffprobe_path") or "ffprobe")
         self.backend = backend or create_backend(self.yamastertub_root, self.logs_dir, self.logger, self.backend_type)
         self._ffmpeg_encoder_text: str | None = None
+        self._backend_available = True
+        self._backend_unavailable_reason = ""
 
         self._validate_runtime()
         try:
@@ -449,35 +451,53 @@ class ReupPipelineService:
             raise RuntimeError(f"ffprobe not found: {self.ffprobe_bin}")
 
         if not self.yamastertub_root.exists():
-            raise RuntimeError(f"Backend root not found for {self.backend_type}: {self.yamastertub_root}")
+            self._backend_available = False
+            self._backend_unavailable_reason = f"Backend root not found for {self.backend_type}: {self.yamastertub_root}"
+            self.logger.warning("%s Render and Process remain available.", self._backend_unavailable_reason)
+            return
 
         required_local_paths = getattr(self.backend, "required_local_paths", None)
         paths_to_check = list(required_local_paths()) if callable(required_local_paths) else []
         missing = [str(path) for path in paths_to_check if not path.exists()]
         if missing:
             backend_name = str(getattr(self.backend, "backend_name", self.backend_type) or self.backend_type)
-            raise RuntimeError(f"Missing required backend files for {backend_name}: {', '.join(missing)}")
+            self._backend_available = False
+            self._backend_unavailable_reason = f"Missing required backend files for {backend_name}: {', '.join(missing)}"
+            self.logger.warning("%s Render and Process remain available.", self._backend_unavailable_reason)
+            return
 
-        channels = list(self.backend.get_channels() or [])
+        try:
+            channels = list(self.backend.get_channels() or [])
+        except Exception as exc:
+            self._backend_available = False
+            self._backend_unavailable_reason = f"Could not load {self.backend_type} backend: {exc}"
+            self.logger.warning("%s Render and Process remain available.", self._backend_unavailable_reason)
+            return
+
         channel_name = self.channel_folder_name
         if not channel_name:
-            if not channels:
-                raise RuntimeError("No YaMasterTub channels found.")
-            channel_name = channels[0]
-            self.state["selected_channel"] = channel_name
-            self._save_state()
-            self.logger.info("Selected channel was empty for this machine; defaulted to %s", channel_name)
+            if channels:
+                channel_name = channels[0]
+                self.state["selected_channel"] = channel_name
+                self._save_state()
+                self.logger.info("Selected channel was empty for this machine; defaulted to %s", channel_name)
+            else:
+                self.logger.warning("No YaMasterTub channels found. Render and Process remain available.")
         elif channel_name not in channels:
             if not channels:
-                raise RuntimeError(f"Configured channel not found in YaMasterTub: {channel_name}")
-            fallback_channel = channels[0]
-            self.logger.warning(
-                "Selected channel %s was not found in YaMasterTub on this machine; falling back to %s",
-                channel_name,
-                fallback_channel,
-            )
-            self.state["selected_channel"] = fallback_channel
-            self._save_state()
+                self.logger.warning(
+                    "Configured channel %s was not found because no YaMasterTub channels are currently loaded.",
+                    channel_name,
+                )
+            else:
+                fallback_channel = channels[0]
+                self.logger.warning(
+                    "Selected channel %s was not found in YaMasterTub on this machine; falling back to %s",
+                    channel_name,
+                    fallback_channel,
+                )
+                self.state["selected_channel"] = fallback_channel
+                self._save_state()
 
     @property
     def channel_folder_name(self) -> str:
@@ -487,7 +507,13 @@ class ReupPipelineService:
         return str(self.config.get("channel_folder_name") or "").strip()
 
     def get_available_channels(self) -> list[str]:
-        return list(self.backend.get_channels() or [])
+        if not self._backend_available:
+            return []
+        try:
+            return list(self.backend.get_channels() or [])
+        except Exception as exc:
+            self.logger.warning("Could not load YaMasterTub channels: %s", exc)
+            return []
 
     @property
     def auto_start_aas_delete_checker(self) -> bool:
@@ -495,6 +521,7 @@ class ReupPipelineService:
 
     def set_channel_folder_name(self, channel_name: str) -> None:
         target = str(channel_name or "").strip()
+        self._require_backend_ready("Switch channel")
         channels = self.get_available_channels()
         if not target:
             raise RuntimeError("Channel name cannot be empty.")
@@ -505,6 +532,11 @@ class ReupPipelineService:
         self.state["selected_channel"] = target
         self._save_state()
         self.logger.info("Switched upload channel on machine %s to %s", self.machine_name, target)
+
+    def _require_backend_ready(self, operation: str) -> None:
+        if not self._backend_available:
+            reason = self._backend_unavailable_reason or "YaMasterTub backend is unavailable on this machine."
+            raise RuntimeError(f"{operation} requires YaMasterTub. {reason}")
 
     @property
     def music_files(self) -> list[str]:
@@ -790,6 +822,8 @@ class ReupPipelineService:
 
     def get_workspace_warnings(self) -> list[str]:
         warnings = list(self.get_input_overview().get("warnings") or [])
+        if not self._backend_available:
+            warnings.append(f"Upload/Add Premium are unavailable on this machine. {self._backend_unavailable_reason}")
         active_bases = {row.output_base for row in self._sync_current_inputs()}
         stale_job_count = sum(1 for job in self.state.get("jobs", {}).values() if job.get("stale"))
         if stale_job_count:
@@ -1006,7 +1040,7 @@ class ReupPipelineService:
         with self._lock:
             rows = self._sync_current_inputs()
             jobs = self.state.setdefault("jobs", {})
-            aas_config = parse_json_maybe(self.backend.get_aas_config(), {})
+            aas_config = parse_json_maybe(self.backend.get_aas_config(), {}) if self._backend_available else {}
             channel_cfg = aas_config.get(self.channel_folder_name) or {}
             entries = channel_cfg.get("audioSubtitlesVideos") or []
             display_rows: list[dict[str, Any]] = []
@@ -1311,6 +1345,7 @@ class ReupPipelineService:
         self.logger.info("Processed %s", job["output_base"])
 
     def ensure_language_codes(self) -> None:
+        self._require_backend_ready("Upload")
         current = " ".join(str(self.backend.get_language_codes()).replace(",", " ").split())
         wanted = " ".join(self.language_codes_string.replace(",", " ").split())
         if current == wanted:
@@ -1356,6 +1391,7 @@ class ReupPipelineService:
         channel_cfg["current_visibility"] = None
 
     def sync_job_to_aas(self, job: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        self._require_backend_ready("Upload")
         config = parse_json_maybe(self.backend.get_aas_config(), {})
         channel_cfg = config.setdefault(
             self.channel_folder_name,
@@ -1386,6 +1422,7 @@ class ReupPipelineService:
         return index, entry
 
     def get_job_entry(self, job: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        self._require_backend_ready("Upload")
         config = parse_json_maybe(self.backend.get_aas_config(), {})
         channel_cfg = config.get(self.channel_folder_name) or {}
         entries = channel_cfg.get("audioSubtitlesVideos") or []
@@ -1469,6 +1506,7 @@ class ReupPipelineService:
         self.logger.info("Created video for %s -> %s", job["output_base"], video_id)
 
     def premium_job(self, job: dict[str, Any]) -> None:
+        self._require_backend_ready("Add Premium")
         self.sync_job_to_aas(job)
         _index, entry = self.get_job_entry(job)
         if self._entry_is_premium_complete(entry):
